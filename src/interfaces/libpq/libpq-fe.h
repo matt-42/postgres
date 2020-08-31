@@ -15,6 +15,10 @@
 #ifndef LIBPQ_FE_H
 #define LIBPQ_FE_H
 
+#ifdef WIN32
+#include <windows.h>
+#endif
+
 #ifdef __cplusplus
 extern "C"
 {
