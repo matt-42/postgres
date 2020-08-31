@@ -6,9 +6,6 @@
  *		Test of batch execution functionality
  */
 
-#ifdef WIN32
-#include <windows.h>
-#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,6 +15,14 @@
 #include "c.h"
 #include "libpq-fe.h"
 #include "portability/instr_time.h"
+
+#define EXPECT(condition, ...) \
+	if (0 == (condition)) \
+	{ \
+		fprintf(stderr, __VA_ARGS__); \
+		goto fail; \
+	}
+   
 
 static void exit_nicely(PGconn *conn);
 static void simple_batch(PGconn *conn);
@@ -54,7 +59,6 @@ simple_batch(PGconn *conn)
 	Oid			dummy_param_oids[1] = {INT4OID};
 
 	fprintf(stderr, "simple batch... ");
-	fflush(stderr);
 
 	/*
 	 * Enter batch mode and dispatch a set of operations, which we'll then
@@ -64,142 +68,64 @@ simple_batch(PGconn *conn)
 	 * processing of results since our out buffer will give us enough slush to
 	 * work with and we won't block on sending. So blocking mode is fine.
 	 */
-	if (PQisnonblocking(conn))
-	{
-		fprintf(stderr, "Expected blocking connection mode\n");
-		goto fail;
-	}
+	EXPECT(!PQisnonblocking(conn), "Expected blocking connection mode\n");
 
-	if (!PQenterBatchMode(conn))
-	{
-		fprintf(stderr, "failed to enter batch mode: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQenterBatchMode(conn), "failed to enter batch mode: %s\n", PQerrorMessage(conn));
 
-	if (!PQsendQueryParams(conn, "SELECT $1", 1, dummy_param_oids,
-						   dummy_params, NULL, NULL, 0))
-	{
-		fprintf(stderr, "dispatching SELECT failed: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQsendQueryParams(conn, "SELECT $1", 1, dummy_param_oids,
+				            		   dummy_params, NULL, NULL, 0),
+				"dispatching SELECT failed: %s\n", PQerrorMessage(conn));
 
-	if (PQexitBatchMode(conn))
-	{
-		fprintf(stderr, "exiting batch mode with work in progress should fail, but succeeded\n");
-		goto fail;
-	}
+	EXPECT(!PQexitBatchMode(conn), "exiting batch mode with work in progress should fail, but succeeded\n");
 
-	if (!PQbatchSendQueue(conn))
-	{
-		fprintf(stderr, "Ending a batch failed: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQbatchSendQueue(conn), "Ending a batch failed: %s\n", PQerrorMessage(conn));
 
 	/*
 	 * in batch mode we have to ask for the first result to be processed;
 	 * until we do PQgetResult will return null:
 	 */
-	if (PQgetResult(conn) != NULL)
-	{
-		fprintf(stderr, "PQgetResult returned something in a batch before first PQbatchProcessQueue() call\n");
-		goto fail;
-	}
-
-	if (!PQbatchProcessQueue(conn))
-	{
-		fprintf(stderr, "PQbatchProcessQueue() failed at first batch entry: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQgetResult(conn) == NULL, "PQgetResult returned something in a batch before first PQbatchProcessQueue() call\n");
+	EXPECT(PQbatchProcessQueue(conn), "PQbatchProcessQueue() failed at first batch entry: %s\n", PQerrorMessage(conn));
 
 	/* We can't PQbatchProcessQueue when there might still be pending results */
-	if (PQbatchProcessQueue(conn))
-	{
-		fprintf(stderr, "PQbatchProcessQueue() should've failed with pending results: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(!PQbatchProcessQueue(conn), "PQbatchProcessQueue() should've failed with pending results: %s\n", PQerrorMessage(conn));
 
 	res = PQgetResult(conn);
-	if (res == NULL)
-	{
-		fprintf(stderr, "PQgetResult returned null when there's a batch item: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(res != NULL, "PQgetResult returned null when there's a batch item: %s\n", PQerrorMessage(conn));
 
-	if (PQresultStatus(res) != PGRES_TUPLES_OK)
-	{
-		fprintf(stderr, "Unexpected result code %s from first batch item\n",
-				PQresStatus(PQresultStatus(res)));
-		goto fail;
-	}
+	EXPECT(PQresultStatus(res) == PGRES_TUPLES_OK, "Unexpected result code %s from first batch item\n", PQresStatus(PQresultStatus(res)));
 
 	PQclear(res);
 	res = NULL;
 
-	if (PQgetResult(conn) != NULL)
-	{
-		fprintf(stderr, "PQgetResult returned something extra after first result before PQbatchProcessQueue() call\n");
-		goto fail;
-	}
+	EXPECT(PQgetResult(conn) == NULL, "PQgetResult returned something extra after first result before PQbatchProcessQueue() call\n");
 
 	/*
 	 * Even though we've processed the result there's still a sync to come and
 	 * we can't exit batch mode yet
 	 */
-	if (PQexitBatchMode(conn))
-	{
-		fprintf(stderr, "exiting batch mode after query but before sync succeeded incorrectly\n");
-		goto fail;
-	}
+	EXPECT(!PQexitBatchMode(conn), "exiting batch mode after query but before sync succeeded incorrectly\n");
 
 	/* should now get an explicit sync result */
-	if (!PQbatchProcessQueue(conn))
-	{
-		fprintf(stderr, "PQbatchProcessQueue() failed at sync after first batch entry: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQbatchProcessQueue(conn), "PQbatchProcessQueue() failed at sync after first batch entry: %s\n", PQerrorMessage(conn));
 
 	res = PQgetResult(conn);
-	if (res == NULL)
-	{
-		fprintf(stderr, "PQgetResult returned null when sync result expected: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(res != NULL, "PQgetResult returned null when sync result expected: %s\n", PQerrorMessage(conn));
 
-	if (PQresultStatus(res) != PGRES_BATCH_END)
-	{
-		fprintf(stderr, "Unexpected result code %s instead of sync result, error: %s\n",
-				PQresStatus(PQresultStatus(res)), PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQresultStatus(res) == PGRES_BATCH_END, "Unexpected result code %s instead of sync result, error: %s\n", PQresStatus(PQresultStatus(res)), PQerrorMessage(conn))
 
 	PQclear(res);
 	res = NULL;
 
-	if (PQgetResult(conn) != NULL)
-	{
-		fprintf(stderr, "PQgetResult returned something extra after end batch call\n");
-		goto fail;
-	}
+	EXPECT(PQgetResult(conn) == NULL, "PQgetResult returned something extra after end batch call\n");
 
 	/* We're still in a batch... */
-	if (PQbatchStatus(conn) == PQBATCH_MODE_OFF)
-	{
-		fprintf(stderr, "Fell out of batch mode somehow\n");
-		goto fail;
-	}
+	EXPECT(PQbatchStatus(conn) != PQBATCH_MODE_OFF, "Fell out of batch mode somehow\n");
 
 	/* until we end it, which we can safely do now */
-	if (!PQexitBatchMode(conn))
-	{
-		fprintf(stderr, "attempt to exit batch mode failed when it should've succeeded: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQexitBatchMode(conn), "attempt to exit batch mode failed when it should've succeeded: %s\n", PQerrorMessage(conn));
 
-	if (PQbatchStatus(conn) != PQBATCH_MODE_OFF)
-	{
-		fprintf(stderr, "exiting batch mode didn't seem to work\n");
-		goto fail;
-	}
+	EXPECT(PQbatchStatus(conn) == PQBATCH_MODE_OFF, "exiting batch mode didn't seem to work\n");
 
 	fprintf(stderr, "ok\n");
 
@@ -216,82 +142,36 @@ test_disallowed_in_batch(PGconn *conn)
 	PGresult   *res = NULL;
 
 	fprintf(stderr, "test error cases... ");
-	fflush(stderr);
 
-	if (PQisnonblocking(conn))
-	{
-		fprintf(stderr, "Expected blocking connection mode: %u\n", __LINE__);
-		goto fail;
-	}
+	EXPECT(!PQisnonblocking(conn), "Expected blocking connection mode: %u\n", __LINE__);
 
-	if (!PQenterBatchMode(conn))
-	{
-		fprintf(stderr, "Unable to enter batch mode\n");
-		goto fail;
-	}
+	EXPECT(PQenterBatchMode(conn), "Unable to enter batch mode\n");
 
-	if (PQbatchStatus(conn) == PQBATCH_MODE_OFF)
-	{
-		fprintf(stderr, "Batch mode not activated properly\n");
-		goto fail;
-	}
+	EXPECT(PQbatchStatus(conn) != PQBATCH_MODE_OFF, "Batch mode not activated properly\n");
 
 	/* PQexec should fail in batch mode */
 	res = PQexec(conn, "SELECT 1");
-	if (PQresultStatus(res) != PGRES_FATAL_ERROR)
-	{
-		fprintf(stderr, "PQexec should fail in batch mode but succeeded\n");
-		goto fail;
-	}
+	EXPECT(PQresultStatus(res) == PGRES_FATAL_ERROR, "PQexec should fail in batch mode but succeeded\n");
 
 	/* So should PQsendQuery */
-	if (PQsendQuery(conn, "SELECT 1") != 0)
-	{
-		fprintf(stderr, "PQsendQuery should fail in batch mode but succeeded\n");
-		goto fail;
-	}
+	EXPECT(PQsendQuery(conn, "SELECT 1") == 0, "PQsendQuery should fail in batch mode but succeeded\n");
 
 	/* Entering batch mode when already in batch mode is OK */
-	if (!PQenterBatchMode(conn))
-	{
-		fprintf(stderr, "re-entering batch mode should be a no-op but failed\n");
-		goto fail;
-	}
+	EXPECT(PQenterBatchMode(conn), "re-entering batch mode should be a no-op but failed\n");
 
-	if (PQisBusy(conn))
-	{
-		fprintf(stderr, "PQisBusy should return false when idle in batch, returned true\n");
-		goto fail;
-	}
+	EXPECT(!PQisBusy(conn), "PQisBusy should return false when idle in batch, returned true\n");
 
 	/* ok, back to normal command mode */
-	if (!PQexitBatchMode(conn))
-	{
-		fprintf(stderr, "couldn't exit idle empty batch mode\n");
-		goto fail;
-	}
+	EXPECT(PQexitBatchMode(conn), "couldn't exit idle empty batch mode\n");
 
-	if (PQbatchStatus(conn) != PQBATCH_MODE_OFF)
-	{
-		fprintf(stderr, "Batch mode not terminated properly\n");
-		goto fail;
-	}
+	EXPECT(PQbatchStatus(conn) == PQBATCH_MODE_OFF, "Batch mode not terminated properly\n");
 
 	/* exiting batch mode when not in batch mode should be a no-op */
-	if (!PQexitBatchMode(conn))
-	{
-		fprintf(stderr, "batch mode exit when not in batch mode should succeed but failed\n");
-		goto fail;
-	}
+	EXPECT(PQexitBatchMode(conn), "batch mode exit when not in batch mode should succeed but failed\n");
 
 	/* can now PQexec again */
 	res = PQexec(conn, "SELECT 1");
-	if (PQresultStatus(res) != PGRES_TUPLES_OK)
-	{
-		fprintf(stderr, "PQexec should succeed after exiting batch mode but failed with: %s\n",
-				PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQresultStatus(res) == PGRES_TUPLES_OK, "PQexec should succeed after exiting batch mode but failed with: %s\n", PQerrorMessage(conn));
 
 	fprintf(stderr, "ok\n");
 
@@ -310,168 +190,71 @@ multi_batch(PGconn *conn)
 	Oid			dummy_param_oids[1] = {INT4OID};
 
 	fprintf(stderr, "multi batch... ");
-	fflush(stderr);
 
 	/*
 	 * Queue up a couple of small batches and process each without returning
 	 * to command mode first.
 	 */
-	if (!PQenterBatchMode(conn))
-	{
-		fprintf(stderr, "failed to enter batch mode: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQenterBatchMode(conn), "failed to enter batch mode: %s\n", PQerrorMessage(conn));
 
-	if (!PQsendQueryParams(conn, "SELECT $1", 1, dummy_param_oids,
-						   dummy_params, NULL, NULL, 0))
-	{
-		fprintf(stderr, "dispatching first SELECT failed: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQsendQueryParams(conn, "SELECT $1", 1, dummy_param_oids,
+						   dummy_params, NULL, NULL, 0), "dispatching first SELECT failed: %s\n", PQerrorMessage(conn));
 
-	if (!PQbatchSendQueue(conn))
-	{
-		fprintf(stderr, "Ending first batch failed: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQbatchSendQueue(conn), "Ending first batch failed: %s\n", PQerrorMessage(conn));
 
-	if (!PQsendQueryParams(conn, "SELECT $1", 1, dummy_param_oids,
-						   dummy_params, NULL, NULL, 0))
-	{
-		fprintf(stderr, "dispatching second SELECT failed: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQsendQueryParams(conn, "SELECT $1", 1, dummy_param_oids,
+						   dummy_params, NULL, NULL, 0), "dispatching second SELECT failed: %s\n", PQerrorMessage(conn));
 
-	if (!PQbatchSendQueue(conn))
-	{
-		fprintf(stderr, "Ending second batch failed: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQbatchSendQueue(conn), "Ending second batch failed: %s\n", PQerrorMessage(conn));
 
 	/* OK, start processing the batch results */
-	if (PQgetResult(conn) != NULL)
-	{
-		fprintf(stderr, "PQgetResult returned something in a batch before first PQbatchProcessQueue() call\n");
-		goto fail;
-	}
+	EXPECT(PQgetResult(conn) == NULL, "PQgetResult returned something in a batch before first PQbatchProcessQueue() call\n");
 
-	if (!PQbatchProcessQueue(conn))
-	{
-		fprintf(stderr, "PQbatchProcessQueue() failed at first batch entry: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQbatchProcessQueue(conn), "PQbatchProcessQueue() failed at first batch entry: %s\n", PQerrorMessage(conn));
 
 	res = PQgetResult(conn);
-	if (res == NULL)
-	{
-		fprintf(stderr, "PQgetResult returned null when there's a batch item: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(res != NULL, "PQgetResult returned null when there's a batch item: %s\n", PQerrorMessage(conn));
 
-	if (PQresultStatus(res) != PGRES_TUPLES_OK)
-	{
-		fprintf(stderr, "Unexpected result code %s from first batch item\n",
-				PQresStatus(PQresultStatus(res)));
-		goto fail;
-	}
+	EXPECT(PQresultStatus(res) == PGRES_TUPLES_OK, "Unexpected result code %s from first batch item\n", PQresStatus(PQresultStatus(res)));
 	PQclear(res);
 	res = NULL;
 
-	if (PQgetResult(conn) != NULL)
-	{
-		fprintf(stderr, "PQgetResult returned something extra after first result before PQbatchProcessQueue() call\n");
-		goto fail;
-	}
+	EXPECT(PQgetResult(conn) == NULL, "PQgetResult returned something extra after first result before PQbatchProcessQueue() call\n");
 
-	if (PQexitBatchMode(conn))
-	{
-		fprintf(stderr, "exiting batch mode after query but before sync succeeded incorrectly\n");
-		goto fail;
-	}
+	EXPECT(!PQexitBatchMode(conn), "exiting batch mode after query but before sync succeeded incorrectly\n");
 
-	if (!PQbatchProcessQueue(conn))
-	{
-		fprintf(stderr, "PQbatchProcessQueue() failed at sync after first batch entry: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQbatchProcessQueue(conn), "PQbatchProcessQueue() failed at sync after first batch entry: %s\n", PQerrorMessage(conn));
 
 	res = PQgetResult(conn);
-	if (res == NULL)
-	{
-		fprintf(stderr, "PQgetResult returned null when sync result expected: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(res != NULL, "PQgetResult returned null when sync result expected: %s\n", PQerrorMessage(conn));
 
-	if (PQresultStatus(res) != PGRES_BATCH_END)
-	{
-		fprintf(stderr, "Unexpected result code %s instead of sync result, error: %s (line %u)\n",
-		   PQresStatus(PQresultStatus(res)), PQerrorMessage(conn), __LINE__);
-		goto fail;
-	}
+	EXPECT(PQresultStatus(res) == PGRES_BATCH_END, "Unexpected result code %s instead of sync result, error: %s (line %u)\n", PQresStatus(PQresultStatus(res)), PQerrorMessage(conn), __LINE__);
 
 	PQclear(res);
 	res = NULL;
 
 	/* second batch */
-	if (!PQbatchProcessQueue(conn))
-	{
-		fprintf(stderr, "PQbatchProcessQueue() failed at second batch entry: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQbatchProcessQueue(conn), "PQbatchProcessQueue() failed at second batch entry: %s\n", PQerrorMessage(conn));
 
 	res = PQgetResult(conn);
-	if (res == NULL)
-	{
-		fprintf(stderr, "PQgetResult returned null when there's a batch item: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(res != NULL, "PQgetResult returned null when there's a batch item: %s\n", PQerrorMessage(conn));
 
-	if (PQresultStatus(res) != PGRES_TUPLES_OK)
-	{
-		fprintf(stderr, "Unexpected result code %s from second batch item\n",
-				PQresStatus(PQresultStatus(res)));
-		goto fail;
-	}
+	EXPECT(PQresultStatus(res) == PGRES_TUPLES_OK, "Unexpected result code %s from second batch item\n",				PQresStatus(PQresultStatus(res)));
 
-	if (!PQbatchProcessQueue(conn))
-	{
-		fprintf(stderr, "PQbatchProcessQueue() failed at second batch sync: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQbatchProcessQueue(conn), "PQbatchProcessQueue() failed at second batch sync: %s\n", PQerrorMessage(conn));
 
 	res = PQgetResult(conn);
-	if (res == NULL)
-	{
-		fprintf(stderr, "PQgetResult returned null when there's a batch item: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(res != NULL, "PQgetResult returned null when there's a batch item: %s\n", PQerrorMessage(conn));
 
-	if (PQresultStatus(res) != PGRES_BATCH_END)
-	{
-		fprintf(stderr, "Unexpected result code %s from second end batch\n",
-				PQresStatus(PQresultStatus(res)));
-		goto fail;
-	}
+	EXPECT(PQresultStatus(res) == PGRES_BATCH_END, "Unexpected result code %s from second end batch\n",				PQresStatus(PQresultStatus(res)));
 
 	/* We're still in a batch... */
-	if (PQbatchStatus(conn) == PQBATCH_MODE_OFF)
-	{
-		fprintf(stderr, "Fell out of batch mode somehow\n");
-		goto fail;
-	}
+	EXPECT(PQbatchStatus(conn) != PQBATCH_MODE_OFF, "Fell out of batch mode somehow\n");
 
 	/* until we end it, which we can safely do now */
-	if (!PQexitBatchMode(conn))
-	{
-		fprintf(stderr, "attempt to exit batch mode failed when it should've succeeded: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQexitBatchMode(conn), "attempt to exit batch mode failed when it should've succeeded: %s\n", PQerrorMessage(conn));
 
-	if (PQbatchStatus(conn) != PQBATCH_MODE_OFF)
-	{
-		fprintf(stderr, "exiting batch mode didn't seem to work\n");
-		goto fail;
-	}
+	EXPECT(PQbatchStatus(conn) == PQBATCH_MODE_OFF, "exiting batch mode didn't seem to work\n");
 
 	fprintf(stderr, "ok\n");
 
@@ -500,21 +283,12 @@ test_batch_abort(PGconn *conn)
 	int			i;
 
 	fprintf(stderr, "aborted batch... ");
-	fflush(stderr);
 
 	res = PQexec(conn, drop_table_sql);
-	if (PQresultStatus(res) != PGRES_COMMAND_OK)
-	{
-		fprintf(stderr, "dispatching DROP TABLE failed: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQresultStatus(res) == PGRES_COMMAND_OK, "dispatching DROP TABLE failed: %s\n", PQerrorMessage(conn));
 
 	res = PQexec(conn, create_table_sql);
-	if (PQresultStatus(res) != PGRES_COMMAND_OK)
-	{
-		fprintf(stderr, "dispatching CREATE TABLE failed: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQresultStatus(res) == PGRES_COMMAND_OK, "dispatching CREATE TABLE failed: %s\n", PQerrorMessage(conn));
 
 
 	/*
@@ -522,54 +296,26 @@ test_batch_abort(PGconn *conn)
 	 * to command mode first. Make sure the second operation in the first
 	 * batch ERRORs.
 	 */
-	if (!PQenterBatchMode(conn))
-	{
-		fprintf(stderr, "failed to enter batch mode: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQenterBatchMode(conn), "failed to enter batch mode: %s\n", PQerrorMessage(conn));
 
 	dummy_params[0] = "1";
-	if (!PQsendQueryParams(conn, insert_sql, 1, dummy_param_oids,
-						   dummy_params, NULL, NULL, 0))
-	{
-		fprintf(stderr, "dispatching first INSERT failed: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQsendQueryParams(conn, insert_sql, 1, dummy_param_oids,
+						   dummy_params, NULL, NULL, 0), "dispatching first INSERT failed: %s\n", PQerrorMessage(conn));
 
-	if (!PQsendQueryParams(conn, "SELECT no_such_function($1)", 1, dummy_param_oids,
-						   dummy_params, NULL, NULL, 0))
-	{
-		fprintf(stderr, "dispatching error select failed: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQsendQueryParams(conn, "SELECT no_such_function($1)", 1, dummy_param_oids,
+						   dummy_params, NULL, NULL, 0), "dispatching error select failed: %s\n", PQerrorMessage(conn));
 
 	dummy_params[0] = "2";
-	if (!PQsendQueryParams(conn, insert_sql, 1, dummy_param_oids,
-						   dummy_params, NULL, NULL, 0))
-	{
-		fprintf(stderr, "dispatching second insert failed: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQsendQueryParams(conn, insert_sql, 1, dummy_param_oids,
+						   dummy_params, NULL, NULL, 0), "dispatching second insert failed: %s\n", PQerrorMessage(conn));
 
-	if (!PQbatchSendQueue(conn))
-	{
-		fprintf(stderr, "Ending first batch failed: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQbatchSendQueue(conn), "Ending first batch failed: %s\n", PQerrorMessage(conn));
 
 	dummy_params[0] = "3";
-	if (!PQsendQueryParams(conn, insert_sql, 1, dummy_param_oids,
-						   dummy_params, NULL, NULL, 0))
-	{
-		fprintf(stderr, "dispatching second-batch insert failed: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQsendQueryParams(conn, insert_sql, 1, dummy_param_oids,
+						   dummy_params, NULL, NULL, 0), "dispatching second-batch insert failed: %s\n", PQerrorMessage(conn));
 
-	if (!PQbatchSendQueue(conn))
-	{
-		fprintf(stderr, "Ending second batch failed: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQbatchSendQueue(conn), "Ending second batch failed: %s\n", PQerrorMessage(conn));
 
 	/*
 	 * OK, start processing the batch results.
@@ -578,35 +324,20 @@ test_batch_abort(PGconn *conn)
 	 * aborted message for the second insert, a batch-end, then a command-ok
 	 * and a batch-ok for the second batch operation.
 	 */
-	if (!PQbatchProcessQueue(conn))
-	{
-		fprintf(stderr, "PQbatchProcessQueue() failed at first batch entry: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQbatchProcessQueue(conn), "PQbatchProcessQueue() failed at first batch entry: %s\n", PQerrorMessage(conn));
 
-	if (((res = PQgetResult(conn)) == NULL) || PQresultStatus(res) != PGRES_COMMAND_OK)
-	{
-		fprintf(stderr, "Unexpected result code %s from first batch item, error='%s'\n",
-				res == NULL ? "NULL" : PQresStatus(PQresultStatus(res)),
-			 res == NULL ? PQerrorMessage(conn) : PQresultErrorMessage(res));
-		goto fail;
-	}
+	EXPECT(((res = PQgetResult(conn)) != NULL) && PQresultStatus(res) == PGRES_COMMAND_OK,
+					"Unexpected result code %s from first batch item, error='%s'\n", 
+					res == NULL ? "NULL" : PQresStatus(PQresultStatus(res)), 
+					res == NULL ? PQerrorMessage(conn) : PQresultErrorMessage(res));
+
 	PQclear(res);
 	res = NULL;
 
 	/* second query, caused error */
-	if (!PQbatchProcessQueue(conn))
-	{
-		fprintf(stderr, "PQbatchProcessQueue() failed at second batch entry: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQbatchProcessQueue(conn), "PQbatchProcessQueue() failed at second batch entry: %s\n", PQerrorMessage(conn));
 
-	if (((res = PQgetResult(conn)) == NULL) || PQresultStatus(res) != PGRES_FATAL_ERROR)
-	{
-		fprintf(stderr, "Unexpected result code from second batch item. Wanted PGRES_FATAL_ERROR, got %s\n",
-				res == NULL ? "NULL" : PQresStatus(PQresultStatus(res)));
-		goto fail;
-	}
+	EXPECT(((res = PQgetResult(conn)) != NULL) && PQresultStatus(res) == PGRES_FATAL_ERROR, "Unexpected result code from second batch item. Wanted PGRES_FATAL_ERROR, got %s\n",res == NULL ? "NULL" : PQresStatus(PQresultStatus(res)));
 	PQclear(res);
 	res = NULL;
 
@@ -617,126 +348,61 @@ test_batch_abort(PGconn *conn)
 	 * they'd get added to a new third batch since we've already sent a
 	 * second. The aborted flag relates only to the batch being received.
 	 */
-	if (PQbatchStatus(conn) != PQBATCH_MODE_ABORTED)
-	{
-		fprintf(stderr, "batch should be flagged as aborted but isn't\n");
-		goto fail;
-	}
+	EXPECT(PQbatchStatus(conn) == PQBATCH_MODE_ABORTED, "batch should be flagged as aborted but isn't\n");
 
 	/* third query in batch, the second insert */
-	if (!PQbatchProcessQueue(conn))
-	{
-		fprintf(stderr, "PQbatchProcessQueue() failed at third batch entry: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQbatchProcessQueue(conn), "PQbatchProcessQueue() failed at third batch entry: %s\n", PQerrorMessage(conn));
 
-	if (((res = PQgetResult(conn)) == NULL) || PQresultStatus(res) != PGRES_BATCH_ABORTED)
-	{
-		fprintf(stderr, "Unexpected result code from third batch item. Wanted PGRES_BATCH_ABORTED, got %s\n",
-				res == NULL ? "NULL" : PQresStatus(PQresultStatus(res)));
-		goto fail;
-	}
+	EXPECT(((res = PQgetResult(conn)) != NULL) && PQresultStatus(res) == PGRES_BATCH_ABORTED, "Unexpected result code from third batch item. Wanted PGRES_BATCH_ABORTED, got %s\n", res == NULL ? "NULL" : PQresStatus(PQresultStatus(res)));
 	PQclear(res);
 	res = NULL;
 
-	if (PQbatchStatus(conn) != PQBATCH_MODE_ABORTED)
-	{
-		fprintf(stderr, "batch should be flagged as aborted but isn't\n");
-		goto fail;
-	}
+	EXPECT(PQbatchStatus(conn) == PQBATCH_MODE_ABORTED, "batch should be flagged as aborted but isn't\n");
 
 	/* We're still in a batch... */
-	if (PQbatchStatus(conn) == PQBATCH_MODE_OFF)
-	{
-		fprintf(stderr, "Fell out of batch mode somehow\n");
-		goto fail;
-	}
+	EXPECT(PQbatchStatus(conn) != PQBATCH_MODE_OFF, "Fell out of batch mode somehow\n");
 
 	/* the batch sync */
-	if (!PQbatchProcessQueue(conn))
-	{
-		fprintf(stderr, "PQbatchProcessQueue() failed at first batch sync: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQbatchProcessQueue(conn), "PQbatchProcessQueue() failed at first batch sync: %s\n", PQerrorMessage(conn));
 
 	/*
 	 * The end of a failed batch is still a PGRES_BATCH_END so clients know to
 	 * start processing results normally again and can tell the difference
 	 * between skipped commands and the sync.
 	 */
-	if (((res = PQgetResult(conn)) == NULL) || PQresultStatus(res) != PGRES_BATCH_END)
-	{
-		fprintf(stderr, "Unexpected result code from first batch sync. Wanted PGRES_BATCH_END, got %s\n",
-				res == NULL ? "NULL" : PQresStatus(PQresultStatus(res)));
-		goto fail;
-	}
+	EXPECT(((res = PQgetResult(conn)) != NULL) && PQresultStatus(res) == PGRES_BATCH_END, 
+				 "Unexpected result code from first batch sync. Wanted PGRES_BATCH_END, got %s\n", 
+				 res == NULL ? "NULL" : PQresStatus(PQresultStatus(res)));
+
 	PQclear(res);
 	res = NULL;
 
-	if (PQbatchStatus(conn) == PQBATCH_MODE_ABORTED)
-	{
-		fprintf(stderr, "sync should've cleared the aborted flag but didn't\n");
-		goto fail;
-	}
+	EXPECT(PQbatchStatus(conn) != PQBATCH_MODE_ABORTED, "sync should've cleared the aborted flag but didn't\n");
 
 	/* We're still in a batch... */
-	if (PQbatchStatus(conn) == PQBATCH_MODE_OFF)
-	{
-		fprintf(stderr, "Fell out of batch mode somehow\n");
-		goto fail;
-	}
+	EXPECT(PQbatchStatus(conn) != PQBATCH_MODE_OFF, "Fell out of batch mode somehow\n");
 
 	/* the insert from the second batch */
-	if (!PQbatchProcessQueue(conn))
-	{
-		fprintf(stderr, "PQbatchProcessQueue() failed at first entry in second batch: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQbatchProcessQueue(conn), "PQbatchProcessQueue() failed at first entry in second batch: %s\n", PQerrorMessage(conn));
 
-	if (((res = PQgetResult(conn)) == NULL) || PQresultStatus(res) != PGRES_COMMAND_OK)
-	{
-		fprintf(stderr, "Unexpected result code %s from first item in second batch\n",
-				res == NULL ? "NULL" : PQresStatus(PQresultStatus(res)));
-		goto fail;
-	}
+	EXPECT(((res = PQgetResult(conn)) != NULL) && PQresultStatus(res) == PGRES_COMMAND_OK, "Unexpected result code %s from first item in second batch\n", res == NULL ? "NULL" : PQresStatus(PQresultStatus(res)));
 	PQclear(res);
 	res = NULL;
 
 	/* the second batch sync */
-	if (!PQbatchProcessQueue(conn))
-	{
-		fprintf(stderr, "PQbatchProcessQueue() failed at second batch sync: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQbatchProcessQueue(conn), "PQbatchProcessQueue() failed at second batch sync: %s\n", PQerrorMessage(conn));
 
-	if (((res = PQgetResult(conn)) == NULL) || PQresultStatus(res) != PGRES_BATCH_END)
-	{
-		fprintf(stderr, "Unexpected result code %s from second batch sync\n",
-				res == NULL ? "NULL" : PQresStatus(PQresultStatus(res)));
-		goto fail;
-	}
+	EXPECT(((res = PQgetResult(conn)) != NULL) && PQresultStatus(res) == PGRES_BATCH_END, "Unexpected result code %s from second batch sync\n", res == NULL ? "NULL" : PQresStatus(PQresultStatus(res)));
 	PQclear(res);
 	res = NULL;
 
 	/* We're still in a batch... */
-	if (PQbatchStatus(conn) == PQBATCH_MODE_OFF)
-	{
-		fprintf(stderr, "Fell out of batch mode somehow\n");
-		goto fail;
-	}
+	EXPECT(PQbatchStatus(conn) != PQBATCH_MODE_OFF, "Fell out of batch mode somehow\n");
 
 	/* until we end it, which we can safely do now */
-	if (!PQexitBatchMode(conn))
-	{
-		fprintf(stderr, "attempt to exit batch mode failed when it should've succeeded: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQexitBatchMode(conn), "attempt to exit batch mode failed when it should've succeeded: %s\n", PQerrorMessage(conn));
 
-	if (PQbatchStatus(conn) != PQBATCH_MODE_OFF)
-	{
-		fprintf(stderr, "exiting batch mode didn't seem to work\n");
-		goto fail;
-	}
+	EXPECT(PQbatchStatus(conn) == PQBATCH_MODE_OFF, "exiting batch mode didn't seem to work\n");
 
 	fprintf(stderr, "ok\n");
 
@@ -754,29 +420,16 @@ test_batch_abort(PGconn *conn)
 	 */
 	res = PQexec(conn, "SELECT itemno FROM batch_demo");
 
-	if (PQresultStatus(res) != PGRES_TUPLES_OK)
-	{
-		fprintf(stderr, "Expected tuples, got %s: %s",
-				PQresStatus(PQresultStatus(res)), PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQresultStatus(res) == PGRES_TUPLES_OK, "Expected tuples, got %s: %s", PQresStatus(PQresultStatus(res)), PQerrorMessage(conn));
 
 	for (i = 0; i < PQntuples(res); i++)
 	{
 		const char *val = PQgetvalue(res, i, 0);
 
-		if (strcmp(val, "3") != 0)
-		{
-			fprintf(stderr, "expected only insert with value 3, got %s", val);
-			goto fail;
-		}
+		EXPECT(strcmp(val, "3") == 0, "expected only insert with value 3, got %s", val);
 	}
 
-	if (PQntuples(res) != 1)
-	{
-		fprintf(stderr, "expected 1 result, got %d", PQntuples(res));
-		goto fail;
-	}
+	EXPECT(PQntuples(res) == 1, "expected 1 result, got %d", PQntuples(res));
 	PQclear(res);
 
 	return;
@@ -819,50 +472,30 @@ batch_insert_pipelined(PGconn *conn, int n_rows)
 	/*
 	 * Do a batched insert into a table created at the start of the batch
 	 */
-	if (!PQenterBatchMode(conn))
-	{
-		fprintf(stderr, "failed to enter batch mode: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQenterBatchMode(conn), "failed to enter batch mode: %s\n", PQerrorMessage(conn));
 
-	if (!PQsendQueryParams(conn, "BEGIN",
-						   0, NULL, NULL, NULL, NULL, 0))
-	{
-		fprintf(stderr, "xact start failed: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQsendQueryParams(conn, "BEGIN",
+						   0, NULL, NULL, NULL, NULL, 0), "xact start failed: %s\n", PQerrorMessage(conn));
 
 	fprintf(stdout, "sent BEGIN\n");
 
 	send_step = BI_DROP_TABLE;
 
-	if (!PQsendQueryParams(conn, drop_table_sql,
-						   0, NULL, NULL, NULL, NULL, 0))
-	{
-		fprintf(stderr, "dispatching DROP TABLE failed: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQsendQueryParams(conn, drop_table_sql,
+						   0, NULL, NULL, NULL, NULL, 0), "dispatching DROP TABLE failed: %s\n", PQerrorMessage(conn));
 
 	fprintf(stdout, "sent DROP\n");
 
 	send_step = BI_CREATE_TABLE;
 
-	if (!PQsendQueryParams(conn, create_table_sql,
-						   0, NULL, NULL, NULL, NULL, 0))
-	{
-		fprintf(stderr, "dispatching CREATE TABLE failed: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQsendQueryParams(conn, create_table_sql,
+						   0, NULL, NULL, NULL, NULL, 0), "dispatching CREATE TABLE failed: %s\n", PQerrorMessage(conn));
 
 	fprintf(stdout, "sent CREATE\n");
 
 	send_step = BI_PREPARE;
 
-	if (!PQsendPrepare(conn, "my_insert", insert_sql, 1, insert_param_oids))
-	{
-		fprintf(stderr, "dispatching PREPARE failed: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQsendPrepare(conn, "my_insert", insert_sql, 1, insert_param_oids), "dispatching PREPARE failed: %s\n", PQerrorMessage(conn));
 
 	fprintf(stdout, "sent PREPARE\n");
 
@@ -875,11 +508,7 @@ batch_insert_pipelined(PGconn *conn, int n_rows)
 	 * query are processed we should pop them to allow processing of the next
 	 * query. There's no need to finish the batch before processing results.
 	 */
-	if (PQsetnonblocking(conn, 1) != 0)
-	{
-		fprintf(stderr, "failed to set nonblocking mode: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQsetnonblocking(conn, 1) == 0, "failed to set nonblocking mode: %s\n", PQerrorMessage(conn));
 
 	while (recv_step != BI_DONE)
 	{
@@ -928,12 +557,9 @@ batch_insert_pipelined(PGconn *conn, int n_rows)
 					 * No more results from this query, advance to the next
 					 * result
 					 */
-					if (!PQbatchProcessQueue(conn))
-					{
-						fprintf(stderr, "Expected next query result but unable to dequeue: %s\n",
+					EXPECT(PQbatchProcessQueue(conn), "Expected next query result but unable to dequeue: %s\n",
 								PQerrorMessage(conn));
-						goto fail;
-					}
+
 					fprintf(stdout, "next query!\n");
 					continue;
 				}
@@ -979,18 +605,11 @@ batch_insert_pipelined(PGconn *conn, int n_rows)
 				fprintf(stderr, "At state %d (%s) expect tag '%s', result code %s, expect %d more rows, transition to %d\n",
 						recv_step, description, cmdtag, PQresStatus(status), rows_to_receive, next_step);
 
-				if (PQresultStatus(res) != status)
-				{
-					fprintf(stderr, "%s reported status %s, expected %s. Error msg is [%s]\n",
+				EXPECT(PQresultStatus(res) == status, "%s reported status %s, expected %s. Error msg is [%s]\n",
 							description, PQresStatus(PQresultStatus(res)), PQresStatus(status), PQerrorMessage(conn));
-					goto fail;
-				}
-				if (strncmp(PQcmdStatus(res), cmdtag, strlen(cmdtag)) != 0)
-				{
-					fprintf(stderr, "%s expected command tag '%s', got '%s'\n",
+
+				EXPECT(strncmp(PQcmdStatus(res), cmdtag, strlen(cmdtag)) == 0, "%s expected command tag '%s', got '%s'\n",
 							description, cmdtag, PQcmdStatus(res));
-					goto fail;
-				}
 
 				fprintf(stdout, "Got %s OK\n", cmdtag);
 
@@ -1062,17 +681,9 @@ batch_insert_pipelined(PGconn *conn, int n_rows)
 	}
 
 	/* We've got the sync message and the batch should be done */
-	if (!PQexitBatchMode(conn))
-	{
-		fprintf(stderr, "attempt to exit batch mode failed when it should've succeeded: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQexitBatchMode(conn), "attempt to exit batch mode failed when it should've succeeded: %s\n", PQerrorMessage(conn));
 
-	if (PQsetnonblocking(conn, 0) != 0)
-	{
-		fprintf(stderr, "failed to clear nonblocking mode: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQsetnonblocking(conn, 0) == 0, "failed to clear nonblocking mode: %s\n", PQerrorMessage(conn));
 
 	return;
 
@@ -1093,35 +704,19 @@ batch_insert_sequential(PGconn *conn, int nrows)
 	insert_params[0] = &insert_param_0[0];
 
 	res = PQexec(conn, "BEGIN");
-	if (PQresultStatus(res) != PGRES_COMMAND_OK)
-	{
-		fprintf(stderr, "BEGIN failed: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQresultStatus(res) == PGRES_COMMAND_OK, "BEGIN failed: %s\n", PQerrorMessage(conn));
 	PQclear(res);
 
 	res = PQexec(conn, drop_table_sql);
-	if (PQresultStatus(res) != PGRES_COMMAND_OK)
-	{
-		fprintf(stderr, "DROP TABLE failed: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQresultStatus(res) == PGRES_COMMAND_OK, "DROP TABLE failed: %s\n", PQerrorMessage(conn));
 	PQclear(res);
 
 	res = PQexec(conn, create_table_sql);
-	if (PQresultStatus(res) != PGRES_COMMAND_OK)
-	{
-		fprintf(stderr, "CREATE TABLE failed: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQresultStatus(res) == PGRES_COMMAND_OK, "CREATE TABLE failed: %s\n", PQerrorMessage(conn));
 	PQclear(res);
 
 	res = PQprepare(conn, "my_insert2", insert_sql, 1, insert_param_oids);
-	if (PQresultStatus(res) != PGRES_COMMAND_OK)
-	{
-		fprintf(stderr, "prepare failed: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQresultStatus(res) == PGRES_COMMAND_OK, "prepare failed: %s\n", PQerrorMessage(conn));
 	PQclear(res);
 
 	while (nrows > 0)
@@ -1131,21 +726,14 @@ batch_insert_sequential(PGconn *conn, int nrows)
 
 		res = PQexecPrepared(conn, "my_insert2",
 							 1, insert_params, NULL, NULL, 0);
-		if (PQresultStatus(res) != PGRES_COMMAND_OK)
-		{
-			fprintf(stderr, "INSERT failed: %s\n", PQerrorMessage(conn));
-			goto fail;
-		}
+		EXPECT(PQresultStatus(res) == PGRES_COMMAND_OK, "INSERT failed: %s\n", PQerrorMessage(conn));
+
 		PQclear(res);
 		nrows--;
 	}
 
 	res = PQexec(conn, "COMMIT");
-	if (PQresultStatus(res) != PGRES_COMMAND_OK)
-	{
-		fprintf(stderr, "COMMIT failed: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQresultStatus(res) == PGRES_COMMAND_OK, "COMMIT failed: %s\n", PQerrorMessage(conn));
 	PQclear(res);
 
 	return;
@@ -1161,28 +749,16 @@ batch_insert_copy(PGconn *conn, int nrows)
 	PGresult   *res = NULL;
 
 	res = PQexec(conn, drop_table_sql);
-	if (PQresultStatus(res) != PGRES_COMMAND_OK)
-	{
-		fprintf(stderr, "DROP TABLE failed: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQresultStatus(res) == PGRES_COMMAND_OK, "DROP TABLE failed: %s\n", PQerrorMessage(conn));
 	PQclear(res);
 
 	res = PQexec(conn, create_table_sql);
-	if (PQresultStatus(res) != PGRES_COMMAND_OK)
-	{
-		fprintf(stderr, "CREATE TABLE failed: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQresultStatus(res) == PGRES_COMMAND_OK, "CREATE TABLE failed: %s\n", PQerrorMessage(conn));
 	PQclear(res);
 	res = NULL;
 
 	res = PQexec(conn, "COPY batch_demo(itemno) FROM stdin");
-	if (PQresultStatus(res) != PGRES_COPY_IN)
-	{
-		fprintf(stderr, "COPY: %s\n", PQerrorMessage(conn));
-		goto fail;
-	}
+	EXPECT(PQresultStatus(res) == PGRES_COPY_IN, "COPY: %s\n", PQerrorMessage(conn));
 	PQclear(res);
 	res = NULL;
 
@@ -1191,37 +767,21 @@ batch_insert_copy(PGconn *conn, int nrows)
 		char		buf[12 + 2];
 		int			formatted = snprintf(&buf[0], 12 + 1, "%d\n", nrows);
 
-		if (formatted >= 12 + 1)
-		{
-			fprintf(stderr, "Buffer write truncated somehow\n");
-			goto fail;
-		}
+		EXPECT(formatted < 12 + 1, "Buffer write truncated somehow\n");
 
-		if (PQputCopyData(conn, buf, formatted) != 1)
-		{
-			fprintf(stderr, "Write of COPY data failed: %s\n",
+		EXPECT(PQputCopyData(conn, buf, formatted) == 1, "Write of COPY data failed: %s\n",
 					PQerrorMessage(conn));
-			goto fail;
-		}
 
 		nrows--;
 	}
 
-	if (PQputCopyEnd(conn, NULL) != 1)
-	{
-		fprintf(stderr, "Finishing COPY failed: %s",
+	EXPECT(PQputCopyEnd(conn, NULL) == 1, "Finishing COPY failed: %s",
 				PQerrorMessage(conn));
-		goto fail;
-	}
 
 	res = PQgetResult(conn);
-	if (PQresultStatus(res) != PGRES_COMMAND_OK)
-	{
-		fprintf(stderr, "COPY finished with %s: %s\n",
-				PQresStatus(PQresultStatus(res)),
+	EXPECT(PQresultStatus(res) == PGRES_COMMAND_OK, "COPY finished with %s: %s\n",			
+	    	PQresStatus(PQresultStatus(res)),
 				PQresultErrorMessage(res));
-		goto fail;
-	}
 	PQclear(res);
 	res = NULL;
 
@@ -1299,12 +859,13 @@ test_singlerowmode(PGconn *conn)
 		int	isSingleTuple = 0;
 		/* Set single row mode for only first 3 SELECT queries */
 		if(i < 3)
+		{
 			r = PQsetSingleRowMode(conn);
 			if (r!=1)
 			{
 				fprintf(stderr, "PQsetSingleRowMode() failed for i=%d\n", i);
 			}
-
+		}
 		while ((res = PQgetResult(conn)) != NULL)
 		{
 			ExecStatusType est = PQresultStatus(res);
@@ -1312,11 +873,7 @@ test_singlerowmode(PGconn *conn)
 			if (est == PGRES_TUPLES_OK)
 			{
 				fprintf(stderr,  ", tuples: %d\n", PQntuples(res));
-				if(!isSingleTuple)
-				{
-					fprintf(stderr, " Expected to follow PGREG_SINGLE_TUPLE, but received PGRES_TUPLES_OK directly instead\n");
-					goto fail;
-				}
+				EXPECT(isSingleTuple, " Expected to follow PGREG_SINGLE_TUPLE, but received PGRES_TUPLES_OK directly instead\n");
 				isSingleTuple=0;
 			}
 			else if (est == PGRES_SINGLE_TUPLE)
